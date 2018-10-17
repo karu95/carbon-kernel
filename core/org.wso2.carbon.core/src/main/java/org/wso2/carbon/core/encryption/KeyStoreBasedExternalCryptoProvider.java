@@ -26,13 +26,21 @@ import org.wso2.carbon.crypto.api.CertificateInfo;
 import org.wso2.carbon.crypto.api.CryptoContext;
 import org.wso2.carbon.crypto.api.CryptoException;
 import org.wso2.carbon.crypto.api.ExternalCryptoProvider;
+import org.wso2.carbon.crypto.api.HybridEncryptionInput;
+import org.wso2.carbon.crypto.api.HybridEncryptionOutput;
 import org.wso2.carbon.crypto.api.PrivateKeyInfo;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.ByteArrayOutputStream;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.Certificate;
-import javax.crypto.Cipher;
+import java.security.spec.AlgorithmParameterSpec;
 
 import static org.wso2.carbon.base.MultitenantConstants.SUPER_TENANT_ID;
 
@@ -42,6 +50,7 @@ import static org.wso2.carbon.base.MultitenantConstants.SUPER_TENANT_ID;
 public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvider {
 
     private static Log log = LogFactory.getLog(KeyStoreBasedExternalCryptoProvider.class);
+    private static SecureRandom random = new SecureRandom();
 
     /**
      * Computes and returns the signature of given data, using the underlying key store.
@@ -94,7 +103,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                     cryptoContext, privateKeyInfo);
 
             // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-            if(log.isDebugEnabled()){
+            if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
             }
             throw new CryptoException(errorMessage, e);
@@ -150,7 +159,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                             "the Java Security API provider : '%s'; %s ; %s", algorithm, javaSecurityAPIProvider,
                     cryptoContext, privateKeyInfo);
             // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-            if(log.isDebugEnabled()){
+            if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
             }
             throw new CryptoException(errorMessage, e);
@@ -210,7 +219,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                             "Java Security API provider '%s'; %s ; %s", algorithm, javaSecurityAPIProvider,
                     cryptoContext, certificateInfo);
             // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-            if(log.isDebugEnabled()){
+            if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
             }
             throw new CryptoException(errorMessage, e);
@@ -275,7 +284,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                             "algorithm '%s' and the Java Security API provider '%s'; %s ; %s ",
                     algorithm, javaSecurityAPIProvider, cryptoContext, certificateInfo);
             // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-            if(log.isDebugEnabled()){
+            if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
             }
             throw new CryptoException(errorMessage, e);
@@ -330,7 +339,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                 String errorMessage = "An error occurred while retrieving the certificate from the key store.";
 
                 // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-                if(log.isDebugEnabled()){
+                if (log.isDebugEnabled()) {
                     log.debug(errorMessage, e);
                 }
 
@@ -393,10 +402,138 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
             String errorMessage = "An error occurred while retrieving the private key from the key store.";
 
             // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
-            if(log.isDebugEnabled()){
+            if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
             }
 
+            throw new CryptoException(errorMessage, e);
+        }
+    }
+
+    /**
+     * Computes and returns the {@link HybridEncryptionOutput} based on provided {@link HybridEncryptionInput}
+     *
+     * @param hybridEncryptionInput Input data for hybrid encryption.*
+     * @param symmetricAlgorithm    The symmetric encryption/decryption algorithm.
+     * @param asymmetricAlgorithm   The asymmetric encryption/decryption algorithm.
+     * @param jceSecurityProvider   The Java Security API provider.
+     * @param cryptoContext         The context information which is used to discover the public key of the external entity.
+     * @return {@link HybridEncryptionOutput} cipher text with required parameters
+     * @throws CryptoException
+     */
+    @Override
+    public HybridEncryptionOutput hybridEncrypt(HybridEncryptionInput hybridEncryptionInput, String asymmetricAlgorithm, String symmetricAlgorithm,
+                                                String jceSecurityProvider, CryptoContext cryptoContext,
+                                                CertificateInfo certificateInfo) throws CryptoException {
+
+        String[] algorithmSpec = symmetricAlgorithm.split("/");
+
+        String keyType = algorithmSpec[0];
+        String[] keySpecification = keyType.split("_");
+        int keyLength = 16;
+        if (keySpecification.length > 1) {
+            keyLength = Integer.parseInt(keySpecification[1]) / 8;
+        }
+        byte[] keyValue = new byte[keyLength];
+        random.nextBytes(keyValue);
+
+        SecretKeySpec symmetricKey = new SecretKeySpec(keyValue, keySpecification[0]);
+
+        try {
+            Cipher cipher;
+
+            if (StringUtils.isBlank(jceSecurityProvider)) {
+                cipher = Cipher.getInstance(symmetricAlgorithm);
+            } else {
+                cipher = Cipher.getInstance(symmetricAlgorithm, jceSecurityProvider);
+            }
+            AlgorithmParameterSpec algoParams = resolveSymmetricAlgorithmParameters(symmetricAlgorithm);
+            cipher.init(Cipher.ENCRYPT_MODE, symmetricKey, algoParams);
+
+            if (hybridEncryptionInput.getAuthData() != null) {
+                cipher.updateAAD(hybridEncryptionInput.getAuthData());
+            }
+
+            byte[] encryptedData = cipher.doFinal(hybridEncryptionInput.getClearData());
+            byte[] encryptedKey = encrypt(keyValue, asymmetricAlgorithm, jceSecurityProvider, cryptoContext,
+                    certificateInfo);
+            if (hybridEncryptionInput.getAuthData() != null) {
+                int tagPos = encryptedData.length - ((GCMParameterSpec) algoParams).getTLen() / 8;
+                byte[] authTag = subArray(encryptedData, tagPos, ((GCMParameterSpec) algoParams).getTLen() / 8);
+                byte[] cipherData = subArray(encryptedData, 0, tagPos);
+                return new HybridEncryptionOutput(cipherData, encryptedKey, hybridEncryptionInput.getAuthData(),
+                        authTag, algoParams);
+            } else {
+                return new HybridEncryptionOutput(encryptedData, encryptedKey, algoParams);
+            }
+        } catch (Exception e) {
+            String errorMessage = String.format("An error occurred while hybrid encrypting data using the " +
+                            "asymmetric algorithm '%s' and symmetric algorithm '%s' with the " +
+                            "Java Security API provider '%s'; %s ; %s", asymmetricAlgorithm, symmetricAlgorithm,
+                    jceSecurityProvider, cryptoContext, certificateInfo);
+            // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new CryptoException(errorMessage, e);
+        }
+    }
+
+    /**
+     * Computes and return clear data based on provided {@link HybridEncryptionOutput}
+     *
+     * @param hybridEncryptionOutput {@link HybridEncryptionOutput} ciphered data with parameters.
+     * @param symmetricAlgorithm     The symmetric encryption/decryption algorithm.
+     * @param asymmetricAlgorithm    The asymmetric encryption/decryption algorithm.
+     * @param jceSecurityProvider    The Java Security API provider.
+     * @param cryptoContext          The context information which is used to discover the public key of the external entity.
+     * @return the decrypted data
+     * @throws CryptoException
+     */
+    @Override
+    public byte[] hybridDecrypt(HybridEncryptionOutput hybridEncryptionOutput, String asymmetricAlgorithm, String symmetricAlgorithm,
+                                String jceSecurityProvider, CryptoContext cryptoContext, PrivateKeyInfo privateKeyInfo)
+            throws CryptoException {
+
+        String[] algorithmSpecification = symmetricAlgorithm.split("/");
+        String[] keySpecification = algorithmSpecification[0].split("_");
+
+        byte[] decryptedKey = decrypt(hybridEncryptionOutput.getEncryptedSymmetricKey(), asymmetricAlgorithm,
+                jceSecurityProvider, cryptoContext, privateKeyInfo);
+
+        SecretKeySpec decryptionKey = new SecretKeySpec(decryptedKey, keySpecification[0]);
+        try {
+            Cipher cipher;
+
+            if (StringUtils.isBlank(jceSecurityProvider)) {
+                cipher = Cipher.getInstance(symmetricAlgorithm);
+            } else {
+                cipher = Cipher.getInstance(symmetricAlgorithm, jceSecurityProvider);
+            }
+            if (hybridEncryptionOutput.getParameterSpec() == null) {
+                cipher.init(Cipher.DECRYPT_MODE, decryptionKey);
+            } else {
+                cipher.init(Cipher.DECRYPT_MODE, decryptionKey, hybridEncryptionOutput.getParameterSpec());
+            }
+
+            if ((hybridEncryptionOutput.getAuthData() != null) && (hybridEncryptionOutput.getAuthTag() != null)) {
+                cipher.updateAAD(hybridEncryptionOutput.getAuthData());
+                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                outputStream.write(hybridEncryptionOutput.getCipherData());
+                outputStream.write(hybridEncryptionOutput.getAuthTag());
+                return cipher.doFinal(outputStream.toByteArray());
+            } else {
+                return cipher.doFinal(hybridEncryptionOutput.getCipherData());
+            }
+        } catch (Exception e) {
+            String errorMessage = String.format("An error occurred while hybrid decrypting using the " +
+                            "symmetric algorithm : '%s' and asymmetric algorithm : '%s'" +
+                            " with the Java Security API provider : '%s'; %s ; %s", symmetricAlgorithm,
+                    asymmetricAlgorithm, jceSecurityProvider, cryptoContext, privateKeyInfo);
+            // Log the exception from client libraries, to avoid missing information if callers code doesn't log it
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
             throw new CryptoException(errorMessage, e);
         }
     }
@@ -411,5 +548,34 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
     private String getTenantKeyStoreName(String tenantDomain) {
 
         return tenantDomain.trim().replace(".", "-") + ".jks";
+    }
+
+    private AlgorithmParameterSpec resolveSymmetricAlgorithmParameters(String symmetricAlgorithm) throws CryptoException {
+        AlgorithmParameterSpec algoParams = null;
+        if (symmetricAlgorithm.contains("AES")) {
+            byte[] iv = new byte[16];
+            random.nextBytes(iv);
+            if (symmetricAlgorithm.contains("GCM")) {
+                algoParams = new GCMParameterSpec(128, iv);
+            } else if (symmetricAlgorithm.contains("OFB") || symmetricAlgorithm.contains("CBC")
+                    || symmetricAlgorithm.contains("CFB")) {
+                algoParams = new IvParameterSpec(iv);
+            }
+        } else if (symmetricAlgorithm.contains("DES")) {
+            byte[] iv = new byte[8];
+            random.nextBytes(iv);
+            algoParams = new IvParameterSpec(iv);
+        } else {
+            String errorMessage = String.format("'%s' symmetric algorithm is not supported by '%s' " +
+                    "external provider for hybrid encryption.", symmetricAlgorithm, this.getClass().getName());
+            throw new CryptoException(errorMessage);
+        }
+        return algoParams;
+    }
+
+    private byte[] subArray(byte[] byteArray, int beginIndex, int length) {
+        byte[] subArray = new byte[length];
+        System.arraycopy(byteArray, beginIndex, subArray, 0, subArray.length);
+        return subArray;
     }
 }
