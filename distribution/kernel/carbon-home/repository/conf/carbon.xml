@@ -370,8 +370,28 @@
             e.g. Resolving the public key of an external entity.
         -->
         <KeyResolvers>
-            <KeyResolver className="org.wso2.carbon.crypto.defaultProvider.resolver.ContextIndependentKeyResolver" priority="-1"/>
+            <KeyResolver className="org.wso2.carbon.identity.cryptoutil.OAuthServiceProviderKeyResolver" priority="1"/>
+            <KeyResolver className="org.wso2.carbon.crypto.defaultProvider.resolver.ContextIndependentKeyResolver" priority="99"/>
+            <KeyResolver className="org.wso2.carbon.crypto.provider.hsm.HSMBasedKeyResolver" priority="100"/>
         </KeyResolvers>
+
+        <HSMBasedCryptoProviderConfig>
+            <HSMConfiguration>
+                <PKCS11Module>/etc/utimaco/libcs_pkcs11_R2.so</PKCS11Module>
+                <SlotConfiguration>
+                    <Slot id="0" pin="12345"/>
+                </SlotConfiguration>
+            </HSMConfiguration>
+
+            <InternalProvider>
+                <InternalProviderSlotID>0</InternalProviderSlotID>
+                <KeyAlias>wso2carbon</KeyAlias>
+            </InternalProvider>
+
+            <ExternalProvider>
+                <ExternalProviderSlotID>0</ExternalProviderSlotID>
+            </ExternalProvider>
+        </HSMBasedCryptoProviderConfig>
 
     </CryptoService>
 

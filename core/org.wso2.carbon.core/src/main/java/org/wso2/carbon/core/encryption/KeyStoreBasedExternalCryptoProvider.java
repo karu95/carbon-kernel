@@ -30,10 +30,6 @@ import org.wso2.carbon.crypto.api.HybridEncryptionInput;
 import org.wso2.carbon.crypto.api.HybridEncryptionOutput;
 import org.wso2.carbon.crypto.api.PrivateKeyInfo;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
 import java.security.KeyStore;
 import java.security.PrivateKey;
@@ -41,6 +37,10 @@ import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.Certificate;
 import java.security.spec.AlgorithmParameterSpec;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 import static org.wso2.carbon.base.MultitenantConstants.SUPER_TENANT_ID;
 
@@ -204,7 +204,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
                 throw new CryptoException(errorMessage);
             }
 
-            cipher.init(Cipher.DECRYPT_MODE, certificate);
+            cipher.init(Cipher.ENCRYPT_MODE, certificate);
             byte[] ciphertext = cipher.doFinal(plaintext);
 
             if (log.isDebugEnabled()) {
@@ -412,6 +412,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
 
     /**
      * Computes and returns the {@link HybridEncryptionOutput} based on provided {@link HybridEncryptionInput}
+     * Hybrid encryption is carried out using JCE providers.
      *
      * @param hybridEncryptionInput Input data for hybrid encryption.*
      * @param symmetricAlgorithm    The symmetric encryption/decryption algorithm.
@@ -422,26 +423,21 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
      * @throws CryptoException
      */
     @Override
-    public HybridEncryptionOutput hybridEncrypt(HybridEncryptionInput hybridEncryptionInput, String asymmetricAlgorithm, String symmetricAlgorithm,
+    public HybridEncryptionOutput hybridEncrypt(HybridEncryptionInput hybridEncryptionInput, String symmetricAlgorithm, String asymmetricAlgorithm,
                                                 String jceSecurityProvider, CryptoContext cryptoContext,
                                                 CertificateInfo certificateInfo) throws CryptoException {
 
-        String[] algorithmSpec = symmetricAlgorithm.split("/");
-
-        String keyType = algorithmSpec[0];
-        String[] keySpecification = keyType.split("_");
+        String[] resolvedSymmetricAlgorithmSpec = resolveSymmetricAlgorithm(symmetricAlgorithm);
         int keyLength = 16;
-        if (keySpecification.length > 1) {
-            keyLength = Integer.parseInt(keySpecification[1]) / 8;
+        if (resolvedSymmetricAlgorithmSpec[1] != null) {
+            keyLength = Integer.parseInt(resolvedSymmetricAlgorithmSpec[1]) / 8;
         }
+        symmetricAlgorithm = resolvedSymmetricAlgorithmSpec[2];
         byte[] keyValue = new byte[keyLength];
         random.nextBytes(keyValue);
-
-        SecretKeySpec symmetricKey = new SecretKeySpec(keyValue, keySpecification[0]);
-
+        SecretKeySpec symmetricKey = new SecretKeySpec(keyValue, resolvedSymmetricAlgorithmSpec[0]);
         try {
             Cipher cipher;
-
             if (StringUtils.isBlank(jceSecurityProvider)) {
                 cipher = Cipher.getInstance(symmetricAlgorithm);
             } else {
@@ -453,8 +449,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
             if (hybridEncryptionInput.getAuthData() != null) {
                 cipher.updateAAD(hybridEncryptionInput.getAuthData());
             }
-
-            byte[] encryptedData = cipher.doFinal(hybridEncryptionInput.getClearData());
+            byte[] encryptedData = cipher.doFinal(hybridEncryptionInput.getPlainData());
             byte[] encryptedKey = encrypt(keyValue, asymmetricAlgorithm, jceSecurityProvider, cryptoContext,
                     certificateInfo);
             if (hybridEncryptionInput.getAuthData() != null) {
@@ -481,6 +476,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
 
     /**
      * Computes and return clear data based on provided {@link HybridEncryptionOutput}
+     * Hybrid decryption is carried out using JCE providers.
      *
      * @param hybridEncryptionOutput {@link HybridEncryptionOutput} ciphered data with parameters.
      * @param symmetricAlgorithm     The symmetric encryption/decryption algorithm.
@@ -491,20 +487,17 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
      * @throws CryptoException
      */
     @Override
-    public byte[] hybridDecrypt(HybridEncryptionOutput hybridEncryptionOutput, String asymmetricAlgorithm, String symmetricAlgorithm,
+    public byte[] hybridDecrypt(HybridEncryptionOutput hybridEncryptionOutput, String symmetricAlgorithm, String asymmetricAlgorithm,
                                 String jceSecurityProvider, CryptoContext cryptoContext, PrivateKeyInfo privateKeyInfo)
             throws CryptoException {
 
-        String[] algorithmSpecification = symmetricAlgorithm.split("/");
-        String[] keySpecification = algorithmSpecification[0].split("_");
-
+        String[] resolvedSpecification = resolveSymmetricAlgorithm(symmetricAlgorithm);
+        symmetricAlgorithm = resolvedSpecification[2];
         byte[] decryptedKey = decrypt(hybridEncryptionOutput.getEncryptedSymmetricKey(), asymmetricAlgorithm,
                 jceSecurityProvider, cryptoContext, privateKeyInfo);
-
-        SecretKeySpec decryptionKey = new SecretKeySpec(decryptedKey, keySpecification[0]);
+        SecretKeySpec decryptionKey = new SecretKeySpec(decryptedKey, resolvedSpecification[0]);
         try {
             Cipher cipher;
-
             if (StringUtils.isBlank(jceSecurityProvider)) {
                 cipher = Cipher.getInstance(symmetricAlgorithm);
             } else {
@@ -515,7 +508,6 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
             } else {
                 cipher.init(Cipher.DECRYPT_MODE, decryptionKey, hybridEncryptionOutput.getParameterSpec());
             }
-
             if ((hybridEncryptionOutput.getAuthData() != null) && (hybridEncryptionOutput.getAuthTag() != null)) {
                 cipher.updateAAD(hybridEncryptionOutput.getAuthData());
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -551,6 +543,7 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
     }
 
     private AlgorithmParameterSpec resolveSymmetricAlgorithmParameters(String symmetricAlgorithm) throws CryptoException {
+
         AlgorithmParameterSpec algoParams = null;
         if (symmetricAlgorithm.contains("AES")) {
             byte[] iv = new byte[16];
@@ -574,8 +567,22 @@ public class KeyStoreBasedExternalCryptoProvider implements ExternalCryptoProvid
     }
 
     private byte[] subArray(byte[] byteArray, int beginIndex, int length) {
+
         byte[] subArray = new byte[length];
         System.arraycopy(byteArray, beginIndex, subArray, 0, subArray.length);
         return subArray;
+    }
+
+    private String[] resolveSymmetricAlgorithm(String symmetricAlgorithm) {
+
+        String[] algorithmSpecification = symmetricAlgorithm.split("/");
+        String[] keySpecification = algorithmSpecification[0].split("_");
+        String keyLength = null;
+        if (keySpecification.length > 1) {
+            keyLength = keySpecification[1];
+        }
+        algorithmSpecification[0] = keySpecification[0];
+        symmetricAlgorithm = String.join("/", algorithmSpecification);
+        return new String[]{keySpecification[0], keyLength, symmetricAlgorithm};
     }
 }
